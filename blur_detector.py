@@ -1,19 +1,66 @@
-import cv2
-import numpy as np
+from fastapi import FastAPI, UploadFile, File
 from PIL import Image
+import numpy as np
+import io
+
+import cv2   # make sure installed
 
 
-def is_blurry(image: Image.Image, threshold: float = 100.0):
-    """
-    Returns:
-    True  = Blurry
-    False = Clear
-    """
+app = FastAPI(title="Blur Detection API")
 
-    # Convert PIL → OpenCV
-    img = np.array(image.convert("L"))
+
+# --------------------------------
+# Blur Detection
+# --------------------------------
+def is_blurry(image: Image.Image):
+
+    # Convert PIL to grayscale numpy
+    gray = np.array(image.convert("L"))
+
+    # Resize for stability
+    gray = cv2.resize(gray, (500, 500))
 
     # Laplacian variance
-    fm = cv2.Laplacian(img, cv2.CV_64F).var()
+    lap = cv2.Laplacian(gray, cv2.CV_64F)
 
-    return fm < threshold, fm
+    score = lap.var()
+
+    threshold = 180
+
+    blurry = score < threshold
+
+    return blurry, score
+
+
+# --------------------------------
+# API
+# --------------------------------
+@app.post("/check_blur/")
+async def check_blur(file: UploadFile = File(...)):
+
+    try:
+
+        contents = await file.read()
+
+        if not contents:
+            return {"error": "Empty file"}
+
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+
+        blurry, score = is_blurry(image)
+
+        return {
+            "filename": file.filename,
+            "blurry": bool(blurry),
+            "blur_score": round(float(score), 2),
+            "status": "Blurry ❌" if blurry else "Clear ✅"
+        }
+
+    except Exception as e:
+
+        # Print error in terminal
+        print("ERROR:", e)
+
+        return {
+            "error": str(e)
+        }
