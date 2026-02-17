@@ -13,14 +13,13 @@ from io import BytesIO
 from tqdm import tqdm
 import zipfile
 
-
 # ---------------- SETTINGS ---------------- #
 
 OUTPUT_FOLDER = "grouped"
 BLUR_FOLDER = "blurry_rejected"
 EPS = 0.05       # similarity threshold
 MIN_SAMPLES = 2   # min images per group
-BATCH_SIZE = 16   # number of images per batch for GPU
+BATCH_SIZE = 64   # number of images per batch for GPU
 
 
 # ---------------- APP ---------------- #
@@ -273,7 +272,7 @@ def cluster_images(filenames, embeddings):
 
 
 @app.post("/upload")
-async def upload_files(files: List[UploadFile] = File(...), store_clusters: bool = True):
+async def upload_files(files: List[UploadFile] = File(...), store_clusters: bool = False):
     """
     Upload images or zip files, group them, analyze quality, and sort within groups.
     Good images appear first in each group.
@@ -410,3 +409,6 @@ def root():
             "Sorted output (Good images first)"
         ]
     }
+
+
+    
