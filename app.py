@@ -19,7 +19,7 @@ OUTPUT_FOLDER = "grouped"
 BLUR_FOLDER = "blurry_rejected"
 EPS = 0.05       # similarity threshold
 MIN_SAMPLES = 2   # min images per group
-BATCH_SIZE = 64   # number of images per batch for GPU
+BATCH_SIZE = 16   # number of images per batch for GPU
 
 
 # ---------------- APP ---------------- #
@@ -354,12 +354,35 @@ async def upload_files(files: List[UploadFile] = File(...), store_clusters: bool
                 quality_info = image_quality[filename]
 
                 if quality_info["blur_score"] < 180:
-                    blur_filename = f"blur_{quality_info['blur_score']:.1f}_{filename}"
-                    img.save(os.path.join(BLUR_FOLDER, blur_filename))
+                    # Use only the basename so we don't recreate nested folders
+                    base_name = os.path.basename(filename)
+                    blur_filename = f"blur_{quality_info['blur_score']:.1f}_{base_name}"
+                    blur_path = os.path.join(BLUR_FOLDER, blur_filename)
+                    os.makedirs(BLUR_FOLDER, exist_ok=True)
+                    # Avoid overwriting existing files by appending a counter
+                    bname, bext = os.path.splitext(blur_filename)
+                    counter = 1
+                    while os.path.exists(blur_path):
+                        blur_filename = f"{bname}_{counter}{bext}"
+                        blur_path = os.path.join(BLUR_FOLDER, blur_filename)
+                        counter += 1
+                    img.save(blur_path)
                 else:
                     prefix = f"{idx:03d}_{quality_info['status']}_"
-                    new_filename = prefix + filename
-                    img.save(os.path.join(folder_path, new_filename))
+                    # Flatten any nested paths - keep only filename
+                    safe_name = os.path.basename(filename)
+                    new_filename = prefix + safe_name
+                    # Ensure group folder exists
+                    os.makedirs(folder_path, exist_ok=True)
+                    # Avoid overwriting by adding a numeric suffix when needed
+                    base_name, ext = os.path.splitext(new_filename)
+                    candidate = new_filename
+                    counter = 1
+                    while os.path.exists(os.path.join(folder_path, candidate)):
+                        candidate = f"{base_name}_{counter}{ext}"
+                        counter += 1
+                    target_path = os.path.join(folder_path, candidate)
+                    img.save(target_path)
 
     # --- 7. Prepare response ---
     groups_with_quality = {}
@@ -411,4 +434,4 @@ def root():
     }
 
 
-    
+        
