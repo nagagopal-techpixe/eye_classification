@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+opencv-python
+mediapipe
+pillow
+scikit-learn
+open-clip-torch
+tqdm
+python-multipart
+numpy
+torch

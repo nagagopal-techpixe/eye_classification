@@ -12,6 +12,9 @@ import open_clip
 from io import BytesIO
 from tqdm import tqdm
 import zipfile
+from pydantic import BaseModel
+import aiohttp
+import asyncio
 
 # ---------------- SETTINGS ---------------- #
 
@@ -269,157 +272,86 @@ def cluster_images(filenames, embeddings):
 
 # ---------------- API ENDPOINT ---------------- #
 
-
-
-@app.post("/upload")
-async def upload_files(files: List[UploadFile] = File(...), store_clusters: bool = False):
-    """
-    Upload images or zip files, group them, analyze quality, and sort within groups.
-    Good images appear first in each group.
-    """
+class ImageLinksRequest(BaseModel):
+    urls: List[str]  # List of image URLs
+    store_clusters: bool = False
+@app.post("/process_image_links_stream")
+async def process_image_links_stream(request: ImageLinksRequest):
+    import aiohttp
     start_time = time.time()
 
-    # List to store all images
-    image_bytes_list = []
-    filenames = []
+    global_filenames = []
+    global_embeddings = []
+    global_image_quality = {}
 
-    # --- 1. Process each uploaded file ---
-    for file in files:
-        content = await file.read()
-        name = file.filename.lower()
+    async def fetch_image(session, url):
+        async with session.get(url) as resp:
+            if resp.status == 200:
+                data = await resp.read()
+                name = url.split("/")[-1]
+                return name, data
+            return None, None
 
-        # If it's a zip file, extract images
-        if name.endswith(".zip"):
-            with zipfile.ZipFile(BytesIO(content)) as z:
-                for info in z.infolist():
-                    if info.filename.lower().endswith((".jpg", ".jpeg", ".png")):
-                        with z.open(info) as img_file:
-                            image_bytes = img_file.read()
-                            image_bytes_list.append(image_bytes)
-                            filenames.append(info.filename)
-        else:
-            # Regular image file
-            image_bytes_list.append(content)
-            filenames.append(file.filename)
+    async with aiohttp.ClientSession() as session:
+        for idx, url in enumerate(request.urls, start=1):
+            name, data = await fetch_image(session, url)
+            if data is None:
+                print(f"Skipping {url}, failed to download")
+                continue
 
-    print(f"Loaded {len(filenames)} images (from individual files + zips)")
+            # --- Analyze quality ---
+            status, score, people, blur_score = get_image_quality_score(data)
+            global_image_quality[name] = {
+                "status": status,
+                "score": score,
+                "people": people,
+                "blur_score": blur_score
+            }
 
-    # --- 2. Compute embeddings in batches ---
-    embeddings_list = []
-    for i in range(0, len(image_bytes_list), BATCH_SIZE):
-        batch_bytes = image_bytes_list[i:i + BATCH_SIZE]
-        batch_embeddings = get_embeddings(batch_bytes)
-        embeddings_list.append(batch_embeddings)
+            # --- Compute embedding ---
+            embedding = get_embeddings([data])[0]  # single image
+            global_embeddings.append(embedding)
+            global_filenames.append(name)
 
-    embeddings = np.vstack(embeddings_list)
+            # --- Clear image bytes from memory ---
+            del data
 
-    # --- 3. Cluster images ---
-    clusters = cluster_images(filenames, embeddings)
+            print(f"Processed {idx}/{len(request.urls)}: {name} -> {status}, score={score}")
 
-    # --- 4. Analyze image quality ---
-    print("Analyzing image quality...")
-    image_quality = {}
+    # --- Global clustering ---
+    all_embeddings = np.vstack(global_embeddings)
+    clusters = cluster_images(global_filenames, all_embeddings)
 
-    for filename, img_bytes in zip(filenames, image_bytes_list):
-        status, score, people, blur_score = get_image_quality_score(img_bytes)
-        image_quality[filename] = {
-            "status": status,
-            "score": score,
-            "people": people,
-            "blur_score": blur_score
-        }
-
-    # --- 5. Sort clusters ---
-    sorted_clusters = {}
-    for label, files_in_group in clusters.items():
-        sorted_files = sorted(
-            files_in_group,
-            key=lambda f: (
-                0 if image_quality[f]["status"] == "Good" else 1,
-                -image_quality[f]["score"]
-            )
-        )
-        sorted_clusters[label] = sorted_files
-
-    # --- 6. Save clustered images ---
-    if store_clusters:
-        for label, sorted_files in sorted_clusters.items():
-            folder_name = f"group_{label}" if label != "others" else "others"
-            folder_path = os.path.join(OUTPUT_FOLDER, folder_name)
-            os.makedirs(folder_path, exist_ok=True)
-
-            for idx, filename in enumerate(sorted_files):
-                file_idx = filenames.index(filename)
-                img = Image.open(BytesIO(image_bytes_list[file_idx])).convert("RGB")
-                quality_info = image_quality[filename]
-
-                if quality_info["blur_score"] < 180:
-                    # Use only the basename so we don't recreate nested folders
-                    base_name = os.path.basename(filename)
-                    blur_filename = f"blur_{quality_info['blur_score']:.1f}_{base_name}"
-                    blur_path = os.path.join(BLUR_FOLDER, blur_filename)
-                    os.makedirs(BLUR_FOLDER, exist_ok=True)
-                    # Avoid overwriting existing files by appending a counter
-                    bname, bext = os.path.splitext(blur_filename)
-                    counter = 1
-                    while os.path.exists(blur_path):
-                        blur_filename = f"{bname}_{counter}{bext}"
-                        blur_path = os.path.join(BLUR_FOLDER, blur_filename)
-                        counter += 1
-                    img.save(blur_path)
-                else:
-                    prefix = f"{idx:03d}_{quality_info['status']}_"
-                    # Flatten any nested paths - keep only filename
-                    safe_name = os.path.basename(filename)
-                    new_filename = prefix + safe_name
-                    # Ensure group folder exists
-                    os.makedirs(folder_path, exist_ok=True)
-                    # Avoid overwriting by adding a numeric suffix when needed
-                    base_name, ext = os.path.splitext(new_filename)
-                    candidate = new_filename
-                    counter = 1
-                    while os.path.exists(os.path.join(folder_path, candidate)):
-                        candidate = f"{base_name}_{counter}{ext}"
-                        counter += 1
-                    target_path = os.path.join(folder_path, candidate)
-                    img.save(target_path)
-
-    # --- 7. Prepare response ---
-    groups_with_quality = {}
+    # --- Sort within clusters by quality ---
+    final_clusters = {}
     blur_list = []
-
-    for label, sorted_files in sorted_clusters.items():
+    for label, files in clusters.items():
+        sorted_files = sorted(
+            files,
+            key=lambda f: (0 if global_image_quality[f]["status"] == "Good" else 1,
+                           -global_image_quality[f]["score"])
+        )
         non_blurry_files = []
-
         for f in sorted_files:
-            if image_quality[f]["blur_score"] < 180:
+            if global_image_quality[f]["blur_score"] < 180:
                 blur_list.append({
                     "filename": f,
-                    "blur_score": image_quality[f]["blur_score"],
+                    "blur_score": global_image_quality[f]["blur_score"],
                     "status": "Blurry"
                 })
             else:
                 non_blurry_files.append(f)
-
         if non_blurry_files:
-            groups_with_quality[label] = non_blurry_files
+            final_clusters[label] = non_blurry_files
 
-    blurry_count = len(blur_list)
-    good_count = sum(1 for q in image_quality.values() if q["status"] == "Good" and q["blur_score"] >= 180)
-    bad_count = sum(1 for q in image_quality.values() if q["status"] == "Bad" and q["blur_score"] >= 180)
-
-    end_time = time.time()
-    processing_time = round(end_time - start_time, 2)
-
+    processing_time = round(time.time() - start_time, 2)
     return {
-        "message": "Images grouped, analyzed, and sorted successfully",
-        "total_images": len(filenames),
-        # "total_groups": len(groups_with_quality),
-        "groups": groups_with_quality,
+        "message": "Global clustering done successfully",
+        "total_images": len(global_filenames),
+        "groups": final_clusters,
         "blur": blur_list,
         "processing_time_seconds": processing_time
     }
-
 
 @app.get("/")
 def root():
@@ -434,4 +366,4 @@ def root():
     }
 
 
-        
+    
